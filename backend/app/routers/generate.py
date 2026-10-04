@@ -5,8 +5,9 @@ from datetime import date
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.config import DEFAULT_PROFILE_ID
+from app.ai_limits import use_ai_quota
 from app.db import get_conn
+from app.profile import current_profile
 from app.gemini import GeminiFailed, GeminiUnavailable
 from app.recipe_ai import GeneratedRecipe, RecipeGenerator, RecipeRequest, get_recipe_generator
 from app.routers.ingredients import resolve_labels
@@ -23,8 +24,9 @@ class Rejected(Exception):
     """A generated recipe failed validation; the message is shown to the user."""
 
 
-def _context(conn: psycopg.Connection, body: GenerateRequest) -> tuple[RecipeRequest, dict]:
-    params = {"profile_id": DEFAULT_PROFILE_ID, "day": date.today()}
+def _context(conn: psycopg.Connection, body: GenerateRequest,
+             profile_id: int) -> tuple[RecipeRequest, dict]:
+    params = {"profile_id": profile_id, "day": date.today()}
     catalog = conn.execute(
         """
         SELECT i.id, i.name, i.always_on_hand,
@@ -48,7 +50,11 @@ def _context(conn: psycopg.Connection, body: GenerateRequest) -> tuple[RecipeReq
         """,
         params,
     ).fetchone()
-    titles = [r["title"] for r in conn.execute("SELECT title FROM recipes ORDER BY title")]
+    titles = [r["title"] for r in conn.execute(
+        "SELECT title FROM recipes WHERE created_by IS NULL OR created_by = %(profile_id)s "
+        "ORDER BY title",
+        params,
+    )]
 
     request = RecipeRequest(
         count=body.count,
@@ -120,15 +126,16 @@ def _validate(conn, recipe: GeneratedRecipe, lookup: dict) -> dict:
     }
 
 
-def _insert(conn: psycopg.Connection, recipe: dict) -> int:
+def _insert(conn: psycopg.Connection, recipe: dict, profile_id: int) -> int:
     recipe_id = conn.execute(
         """
-        INSERT INTO recipes (title, description, meal_type, servings, total_minutes, steps, source)
+        INSERT INTO recipes (title, description, meal_type, servings, total_minutes, steps,
+                             source, created_by)
         VALUES (%(title)s, %(description)s, %(meal_type)s, %(servings)s, %(total_minutes)s,
-                %(steps)s, 'gemini')
+                %(steps)s, 'gemini', %(profile_id)s)
         RETURNING id
         """,
-        recipe,
+        {**recipe, "profile_id": profile_id},
     ).fetchone()["id"]
     conn.execute(
         """
@@ -145,11 +152,14 @@ def _insert(conn: psycopg.Connection, recipe: dict) -> int:
 def generate_recipes(
     body: GenerateRequest,
     conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
     generator: RecipeGenerator = Depends(get_recipe_generator),
 ):
     """Ask Gemini for new recipes tailored to the pantry, today's goals and
-    allergies. Valid ones are saved permanently; invalid ones are reported."""
-    request, lookup = _context(conn, body)
+    allergies. Valid ones are saved to your menu (only you see them); invalid
+    ones are reported."""
+    request, lookup = _context(conn, body, profile_id)
+    use_ai_quota(conn, profile_id, "generate")
     try:
         proposals = generator.generate(request)
     except GeminiUnavailable as exc:
@@ -164,25 +174,29 @@ def generate_recipes(
         except Rejected as reason:
             rejected.append(RejectedRecipe(title=proposal.title, reason=str(reason)))
             continue
-        created_ids.append(_insert(conn, clean))
+        created_ids.append(_insert(conn, clean, profile_id))
         lookup["titles"].add(clean["title"].lower())  # no duplicates within one batch
 
-    created = [_query_matches(conn, recipe_id=rid, include_avoided=True)[0] for rid in created_ids]
+    created = [_query_matches(conn, profile_id, recipe_id=rid, include_avoided=True)[0]
+               for rid in created_ids]
     return GenerateResult(created=created, rejected=rejected)
 
 
 @router.delete("/{recipe_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_recipe(recipe_id: int, conn: psycopg.Connection = Depends(get_conn)):
+def delete_recipe(recipe_id: int, conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
+):
     """Remove a Gemini recipe you don't want. Curated recipes can't be deleted,
     and recipes you've logged are kept so your meal history stays intact."""
     row = conn.execute(
         """
         SELECT r.source, EXISTS (SELECT 1 FROM meal_logs m WHERE m.recipe_id = r.id) AS logged
-        FROM recipes r WHERE r.id = %s
+        FROM recipes r
+        WHERE r.id = %s AND (r.created_by IS NULL OR r.created_by = %s)
         """,
-        (recipe_id,),
+        (recipe_id, profile_id),
     ).fetchone()
-    if row is None:
+    if row is None:  # also hides other visitors' recipes
         raise HTTPException(404, "Recipe not found.")
     if row["source"] != "gemini":
         raise HTTPException(403, "Only Gemini-generated recipes can be removed.")

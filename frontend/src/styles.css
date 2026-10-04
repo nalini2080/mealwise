@@ -165,6 +165,7 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .dropzone.dragging, .dropzone:hover { border-color: var(--primary); }
 .dropzone-empty { display: grid; justify-items: center; gap: 0.25rem; padding: 2rem 1rem; text-align: center; }
 .big-icon { font-size: 2.5rem; }
+.sample-link { display: block; margin: 0.75rem auto 0; }
 .preview { width: 100%; max-height: 360px; object-fit: cover; display: block; }
 
 .review { margin-top: 1.25rem; }

@@ -7,20 +7,22 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;  -- fuzzy matching for search + photo la
 DROP VIEW IF EXISTS recipe_nutrition, profile_avoided CASCADE;
 DROP TABLE IF EXISTS meal_logs, nutrition_goals, pantry_items, recipe_ingredients,
     recipes, profile_allergens, profile_avoided_ingredients, ingredient_allergens,
-    ingredient_aliases, ingredients, profiles CASCADE;
-DROP TYPE IF EXISTS pantry_source, meal_type, allergen, recipe_source CASCADE;
+    ingredient_aliases, ingredients, ai_requests, profiles CASCADE;
+DROP TYPE IF EXISTS pantry_source, meal_type, allergen, recipe_source, ai_kind CASCADE;
 
 CREATE TYPE pantry_source AS ENUM ('photo', 'typed', 'checklist');
 CREATE TYPE meal_type     AS ENUM ('breakfast', 'lunch', 'dinner', 'snack');
 CREATE TYPE recipe_source AS ENUM ('curated', 'gemini');
+CREATE TYPE ai_kind       AS ENUM ('scan', 'generate');
 -- Based on the FDA's nine major food allergens. "gluten" stands in for the FDA's
 -- "wheat" and is broader on purpose, so it also covers oats (usually
 -- cross-contaminated) for people with celiac disease.
 CREATE TYPE allergen      AS ENUM ('dairy', 'eggs', 'peanuts', 'tree_nuts', 'soy',
                                    'gluten', 'fish', 'shellfish', 'sesame');
 
--- One row per person. The app runs single-user today, but every per-person
--- table hangs off profiles so adding auth later is a non-breaking change.
+-- One row per person. Visitors get an anonymous profile automatically (tracked
+-- by a signed cookie); every per-person table hangs off profiles, so adding
+-- real accounts later is a non-breaking change.
 CREATE TABLE profiles (
     id          SERIAL PRIMARY KEY,
     name        TEXT NOT NULL,
@@ -64,17 +66,22 @@ CREATE INDEX ingredient_allergens_allergen_idx ON ingredient_allergens (allergen
 
 CREATE TABLE recipes (
     id            SERIAL PRIMARY KEY,
-    title         TEXT NOT NULL UNIQUE,
+    title         TEXT NOT NULL,
     description   TEXT NOT NULL,
     meal_type     meal_type NOT NULL,
     servings      INT NOT NULL CHECK (servings > 0),
     total_minutes INT NOT NULL CHECK (total_minutes > 0),
     steps         TEXT[] NOT NULL,
     source        recipe_source NOT NULL DEFAULT 'curated',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    -- Gemini recipes belong to the visitor who asked for them; curated ones to nobody.
+    created_by    INT REFERENCES profiles(id) ON DELETE CASCADE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((source = 'curated') = (created_by IS NULL))
 );
--- Titles are unique ignoring case, so Gemini can't add "chickpea curry" next to "Chickpea Curry".
-CREATE UNIQUE INDEX recipes_title_lower_idx ON recipes (lower(title));
+-- Titles are unique ignoring case within what one person can see (curated
+-- recipes share owner 0), so Gemini can't add "chickpea curry" next to "Chickpea Curry".
+CREATE UNIQUE INDEX recipes_title_owner_idx ON recipes (lower(title), COALESCE(created_by, 0));
+CREATE INDEX recipes_created_by_idx ON recipes (created_by) WHERE created_by IS NOT NULL;
 
 -- Many-to-many: which ingredients a recipe uses and how much.
 CREATE TABLE recipe_ingredients (
@@ -108,13 +115,14 @@ CREATE TABLE profile_avoided_ingredients (
     PRIMARY KEY (profile_id, ingredient_id)
 );
 
+-- Defaults are tuned for an active adult woman; every new profile starts here.
 CREATE TABLE nutrition_goals (
     profile_id    INT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
-    kcal          INT NOT NULL CHECK (kcal BETWEEN 1000 AND 5000),
-    protein_g     INT NOT NULL CHECK (protein_g BETWEEN 20 AND 300),
-    veg_servings  INT NOT NULL CHECK (veg_servings BETWEEN 1 AND 15),
-    fiber_g       INT NOT NULL CHECK (fiber_g BETWEEN 5 AND 80),
-    iron_mg       INT NOT NULL CHECK (iron_mg BETWEEN 5 AND 60),
+    kcal          INT NOT NULL DEFAULT 2000 CHECK (kcal BETWEEN 1000 AND 5000),
+    protein_g     INT NOT NULL DEFAULT 90   CHECK (protein_g BETWEEN 20 AND 300),
+    veg_servings  INT NOT NULL DEFAULT 5    CHECK (veg_servings BETWEEN 1 AND 15),
+    fiber_g       INT NOT NULL DEFAULT 28   CHECK (fiber_g BETWEEN 5 AND 80),
+    iron_mg       INT NOT NULL DEFAULT 18   CHECK (iron_mg BETWEEN 5 AND 60),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -127,6 +135,17 @@ CREATE TABLE meal_logs (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX meal_logs_profile_day_idx ON meal_logs (profile_id, eaten_on);
+
+-- One row per Gemini call, used to enforce daily limits (per visitor and
+-- overall) so a public demo can't exhaust the free API quota.
+CREATE TABLE ai_requests (
+    id          BIGSERIAL PRIMARY KEY,
+    profile_id  INT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    kind        ai_kind NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ai_requests_created_idx ON ai_requests (created_at);
+CREATE INDEX ai_requests_profile_idx ON ai_requests (profile_id, created_at);
 
 -- Every ingredient a profile must avoid, from either source. Used by the
 -- recipe matcher, recipe detail and shopping list so the rule lives in one place.

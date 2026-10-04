@@ -7,6 +7,9 @@ you can make right now. They are ranked by how few ingredients you're missing an
 meal closes the gap on today's protein, veggie, iron and fiber goals. I built it around a personal
 goal: eating in a way that supports a regular menstrual cycle.
 
+**▶ Live demo: _link coming soon_**: free hosting, so the first load after a quiet period
+takes about a minute while the server wakes up.
+
 ![Photo scan: Gemini detects ingredients, the user reviews before saving](docs/screenshots/1-photo-scan.png)
 
 | Meal ideas ranked by what you have | Recipe detail | Daily goals |
@@ -42,6 +45,9 @@ goal: eating in a way that supports a regular menstrual cycle.
   all calculated from nutrition data instead of typed in by hand.
 - **Meal log and progress bars** against editable daily goals.
 - **Shopping list** that combines missing ingredients across the recipes you pick.
+- **Built for a public demo:** every visitor automatically gets a private profile (no sign-up),
+  Gemini recipes are visible only to the visitor who created them, and AI use is capped per
+  day so the free API quota can't be exhausted.
 
 ## Architecture
 
@@ -136,7 +142,10 @@ Highlights (see [`db/schema.sql`](db/schema.sql)):
 - **Seed integrity:** recipes are written by ingredient *name* and resolved to ids at load time.
   A `DO` block aborts the seed if any name fails to resolve, so a typo can't silently drop an
   ingredient.
-- A `profiles` table scopes every per-person row, so adding login later needs no migration.
+- A `profiles` table scopes every per-person row. Visitors get an anonymous profile through
+  a **signed cookie** (an HMAC, so it can't be edited to read someone else's data), and adding
+  real accounts later needs no schema change.
+- `ai_requests` logs each Gemini call to enforce rolling 24-hour limits per visitor and overall.
 
 ## Tech stack
 
@@ -146,7 +155,7 @@ Highlights (see [`db/schema.sql`](db/schema.sql)):
 | Backend | Python 3.11+, FastAPI, Pydantic, psycopg 3 with a connection pool, raw SQL (no ORM, on purpose) |
 | AI | Google Gemini Flash (`google-genai`), structured JSON output, retries with backoff on rate limits |
 | Frontend | React 19 + Vite, plain CSS with design tokens, light and dark mode, responsive |
-| Quality | pytest (67 tests against a real Postgres test database), GitHub Actions CI |
+| Quality | pytest (75 tests against a real Postgres test database), GitHub Actions CI |
 
 ## Run it locally
 
@@ -165,6 +174,21 @@ Without a key, photo scanning shows a friendly message and everything else still
 with the sample photo in [`docs/samples/`](docs/samples/).
 
 Interactive API docs are generated automatically at `http://localhost:8010/docs`.
+
+## Deploy your own (free)
+
+The app ships as **one Docker image**: FastAPI serves both the API and the built React app.
+The database creates and seeds itself on first start, and later deploys never touch it.
+
+1. **Database:** create a free project at [neon.com](https://neon.com) (permanent free plan, no
+   credit card) and copy its connection string.
+2. **App:** on [render.com](https://render.com), choose **New → Blueprint** and pick this repo.
+   [`render.yaml`](render.yaml) sets up a free web service. Paste `DATABASE_URL` (from Neon) and
+   `GEMINI_API_KEY` when asked; `SECRET_KEY` is generated for you.
+3. Every push to `main` redeploys automatically.
+
+Optional settings: `AI_LIMIT_PER_VISITOR` (default 15/day), `AI_LIMIT_TOTAL` (default 200/day),
+`GEMINI_MODEL`, `GEMINI_FALLBACK_MODEL`.
 
 ## API
 
@@ -202,6 +226,7 @@ deterministic. They cover:
 - fuzzy search (aliases and typos), and mapping photo labels to the catalog
 - recipe generation: catalog checks, allergy safety net, duplicates, unrealistic drafts, delete rules
 - allergies: hiding recipes, ingredients with two allergens, optional ingredients, shopping list
+- visitor isolation: separate pantries, forged cookies, private AI recipes, daily AI limits
 - validation and error paths (404 / 413 / 415 / 422 / 502 / 503)
 - Gemini retry, backoff and fallback-model behavior
 
@@ -225,11 +250,10 @@ deterministic. They cover:
 
 ## What I'd build next
 
-- Login, with a profile per user (the schema is already scoped by `profile_id`)
+- Optional accounts, so a profile can follow you across devices (the schema is already ready)
 - Cycle-phase logging, to see how intake lines up with how you feel
 - Recipe import from a URL, with ingredient parsing
 - Let Gemini suggest new catalog ingredients (reviewed before they're added)
-- Deploy (Render + Neon Postgres) with a seeded demo account
 
 ---
 

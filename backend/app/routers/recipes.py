@@ -3,8 +3,8 @@ from datetime import date
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.config import DEFAULT_PROFILE_ID
 from app.db import get_conn
+from app.profile import current_profile
 from app.schemas import MealType, RecipeDetail, RecipeMatch, ShoppingItem
 
 router = APIRouter(prefix="/api", tags=["recipes"])
@@ -84,7 +84,8 @@ JOIN coverage c         ON c.recipe_id = r.id
 JOIN recipe_nutrition n ON n.recipe_id = r.id
 JOIN recipe_tags t      ON t.recipe_id = r.id
 CROSS JOIN remaining rem
-WHERE (%(recipe_id)s::int IS NULL OR r.id = %(recipe_id)s)
+WHERE (r.created_by IS NULL OR r.created_by = %(profile_id)s)  -- curated + your own Gemini recipes
+  AND (%(recipe_id)s::int IS NULL OR r.id = %(recipe_id)s)
   AND (%(meal_type)s::meal_type IS NULL OR r.meal_type = %(meal_type)s)
   AND (%(tag)s::text IS NULL OR %(tag)s = ANY(t.tags))
   AND cardinality(c.missing) <= %(max_missing)s
@@ -103,11 +104,11 @@ def _to_match(row: dict) -> dict:
     return row
 
 
-def _query_matches(conn, *, recipe_id=None, meal_type=None, tag=None, max_missing=99,
+def _query_matches(conn, profile_id: int, *, recipe_id=None, meal_type=None, tag=None, max_missing=99,
                    sort="missing", day=None, include_avoided=False) -> list[dict]:
     sql = MATCH_SQL.format(order_by=ORDERINGS[sort])
     rows = conn.execute(sql, {
-        "profile_id": DEFAULT_PROFILE_ID, "recipe_id": recipe_id, "meal_type": meal_type,
+        "profile_id": profile_id, "recipe_id": recipe_id, "meal_type": meal_type,
         "tag": tag, "max_missing": max_missing, "day": day or date.today(),
         "include_avoided": include_avoided,
     }).fetchall()
@@ -121,18 +122,21 @@ def match_recipes(
     tag: str | None = None,
     sort: str = Query(default="missing", pattern="^(missing|goals)$"),
     conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
 ):
     """Recipes ranked by how few ingredients you're missing, then by goal fit.
     Recipes that need anything on your allergies/avoid list are never returned."""
-    return _query_matches(conn, meal_type=meal_type, tag=tag,
+    return _query_matches(conn, profile_id, meal_type=meal_type, tag=tag,
                           max_missing=max_missing, sort=sort)
 
 
 @router.get("/recipes/{recipe_id}", response_model=RecipeDetail)
-def get_recipe(recipe_id: int, conn: psycopg.Connection = Depends(get_conn)):
+def get_recipe(recipe_id: int, conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
+):
     # Detail still opens for an avoided recipe (e.g. one logged before an allergy
     # was added), but `conflicts` and per-ingredient `avoid` flags make it explicit.
-    matches = _query_matches(conn, recipe_id=recipe_id, include_avoided=True)
+    matches = _query_matches(conn, profile_id, recipe_id=recipe_id, include_avoided=True)
     if not matches:
         raise HTTPException(404, "Recipe not found.")
     recipe = matches[0]
@@ -153,7 +157,7 @@ def get_recipe(recipe_id: int, conn: psycopg.Connection = Depends(get_conn)):
         WHERE ri.recipe_id = %(recipe_id)s
         ORDER BY ri.is_optional, ri.grams DESC
         """,
-        {"profile_id": DEFAULT_PROFILE_ID, "recipe_id": recipe_id},
+        {"profile_id": profile_id, "recipe_id": recipe_id},
     ).fetchall()
     return recipe
 
@@ -162,6 +166,7 @@ def get_recipe(recipe_id: int, conn: psycopg.Connection = Depends(get_conn)):
 def shopping_list(
     recipe_ids: list[int] = Query(min_length=1, max_length=20),
     conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
 ):
     """Everything missing for the chosen recipes, combined across recipes.
     Never lists an ingredient on your allergies/avoid list."""
@@ -174,6 +179,7 @@ def shopping_list(
         JOIN recipes r     ON r.id = ri.recipe_id
         JOIN ingredients i ON i.id = ri.ingredient_id
         WHERE ri.recipe_id = ANY(%(recipe_ids)s)
+          AND (r.created_by IS NULL OR r.created_by = %(profile_id)s)
           AND NOT ri.is_optional
           AND NOT i.always_on_hand
           AND NOT EXISTS (
@@ -187,5 +193,5 @@ def shopping_list(
         GROUP BY i.id, i.name, i.category
         ORDER BY i.category, i.name
         """,
-        {"recipe_ids": recipe_ids, "profile_id": DEFAULT_PROFILE_ID},
+        {"recipe_ids": recipe_ids, "profile_id": profile_id},
     ).fetchall()

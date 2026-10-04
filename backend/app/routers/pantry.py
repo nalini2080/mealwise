@@ -1,8 +1,10 @@
 import psycopg
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
-from app.config import ALLOWED_IMAGE_TYPES, DEFAULT_PROFILE_ID, MAX_UPLOAD_BYTES
+from app.config import ALLOWED_IMAGE_TYPES, MAX_UPLOAD_BYTES
+from app.ai_limits import use_ai_quota
 from app.db import get_conn
+from app.profile import current_profile
 from app.routers.ingredients import resolve_labels
 from app.schemas import DetectedIngredient, PantryAdd, PantryItem, ScanResult
 from app.gemini import GeminiFailed, GeminiUnavailable
@@ -20,12 +22,16 @@ ORDER BY i.category, i.name
 
 
 @router.get("", response_model=list[PantryItem])
-def list_pantry(conn: psycopg.Connection = Depends(get_conn)):
-    return conn.execute(LIST_SQL, (DEFAULT_PROFILE_ID,)).fetchall()
+def list_pantry(conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
+):
+    return conn.execute(LIST_SQL, (profile_id,)).fetchall()
 
 
 @router.post("", response_model=list[PantryItem], status_code=status.HTTP_201_CREATED)
-def add_to_pantry(body: PantryAdd, conn: psycopg.Connection = Depends(get_conn)):
+def add_to_pantry(body: PantryAdd, conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
+):
     """Add ingredients; re-adding an existing one is a no-op (idempotent)."""
     found = conn.execute(
         "SELECT id FROM ingredients WHERE id = ANY(%s)", (body.ingredient_ids,)
@@ -40,30 +46,35 @@ def add_to_pantry(body: PantryAdd, conn: psycopg.Connection = Depends(get_conn))
         SELECT %s, unnest(%s::int[]), %s
         ON CONFLICT (profile_id, ingredient_id) DO NOTHING
         """,
-        (DEFAULT_PROFILE_ID, body.ingredient_ids, body.source),
+        (profile_id, body.ingredient_ids, body.source),
     )
-    return conn.execute(LIST_SQL, (DEFAULT_PROFILE_ID,)).fetchall()
+    return conn.execute(LIST_SQL, (profile_id,)).fetchall()
 
 
 @router.delete("/{ingredient_id}", status_code=status.HTTP_204_NO_CONTENT)
-def remove_from_pantry(ingredient_id: int, conn: psycopg.Connection = Depends(get_conn)):
+def remove_from_pantry(ingredient_id: int, conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
+):
     deleted = conn.execute(
         "DELETE FROM pantry_items WHERE profile_id = %s AND ingredient_id = %s",
-        (DEFAULT_PROFILE_ID, ingredient_id),
+        (profile_id, ingredient_id),
     ).rowcount
     if not deleted:
         raise HTTPException(404, "That ingredient is not in your pantry.")
 
 
 @router.delete("", status_code=status.HTTP_204_NO_CONTENT)
-def clear_pantry(conn: psycopg.Connection = Depends(get_conn)):
-    conn.execute("DELETE FROM pantry_items WHERE profile_id = %s", (DEFAULT_PROFILE_ID,))
+def clear_pantry(conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
+):
+    conn.execute("DELETE FROM pantry_items WHERE profile_id = %s", (profile_id,))
 
 
 @router.post("/scan", response_model=ScanResult)
 def scan_photo(
     photo: UploadFile = File(...),
     conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
     detector: IngredientDetector = Depends(get_detector),
 ):
     """Detect ingredients in a photo. Nothing is saved: the user reviews the
@@ -79,6 +90,7 @@ def scan_photo(
     if not image:
         raise HTTPException(400, "The uploaded file is empty.")
 
+    use_ai_quota(conn, profile_id, "scan")
     vocabulary = [
         row["name"]
         for row in conn.execute("SELECT name FROM ingredients WHERE NOT always_on_hand")

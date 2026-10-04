@@ -28,14 +28,11 @@ def test_database():
 
 @pytest.fixture(autouse=True)
 def clean_state():
-    """Each test starts with an empty pantry, no meals, no allergies and default goals."""
+    """Each test's client is a brand-new visitor (fresh cookie jar -> new profile
+    with default goals). Old profiles are deleted, which cascades to their pantry,
+    meals, allergies, AI usage and Gemini recipes, but never to curated recipes."""
     with psycopg.connect(DATABASE_URL) as conn:
-        conn.execute("TRUNCATE pantry_items, meal_logs, profile_allergens, profile_avoided_ingredients")
-        conn.execute("DELETE FROM recipes WHERE source = 'gemini'")
-        conn.execute(
-            "UPDATE nutrition_goals SET kcal=2000, protein_g=90, veg_servings=5, "
-            "fiber_g=28, iron_mg=18 WHERE profile_id = 1"
-        )
+        conn.execute("DELETE FROM profiles")
     yield
 
 

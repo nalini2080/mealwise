@@ -29,6 +29,11 @@ export default function PhotoScan({ inPantry, onConfirm }) {
     setError(null);
   };
 
+  const loadSample = async () => {
+    const blob = await (await fetch("/sample-fridge.jpg")).blob();
+    choose(new File([blob], "sample-fridge.jpg", { type: "image/jpeg" }));
+  };
+
   const scan = async () => {
     setStatus("scanning");
     setError(null);
@@ -101,6 +106,12 @@ export default function PhotoScan({ inPantry, onConfirm }) {
           onChange={(e) => choose(e.target.files[0])}
         />
       </div>
+
+      {!file && (
+        <button className="link sample-link" onClick={loadSample}>
+          No photo handy? Try a sample fridge photo
+        </button>
+      )}
 
       {file && status !== "review" && (
         <button className="primary wide" onClick={scan} disabled={status === "scanning"}>

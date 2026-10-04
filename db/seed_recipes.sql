@@ -395,9 +395,5 @@ FROM staging_recipe_ingredients s
 JOIN recipes r     ON r.title = s.recipe
 JOIN ingredients i ON i.name  = s.ingredient;
 
--- Default single profile with goals tuned for an active adult woman.
-INSERT INTO profiles (name) VALUES ('Me');
-INSERT INTO nutrition_goals (profile_id, kcal, protein_g, veg_servings, fiber_g, iron_mg)
-VALUES (1, 2000, 90, 5, 28, 18);
 
 DROP TABLE staging_recipe_ingredients;

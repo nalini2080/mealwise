@@ -22,6 +22,16 @@ def get_conn(request: Request) -> Iterator[psycopg.Connection]:
         yield conn
 
 
+def ensure_database(url: str = DATABASE_URL) -> bool:
+    """Create and seed the schema only if it doesn't exist yet (safe on every
+    deploy: existing data is never touched). Returns True if it initialized."""
+    with psycopg.connect(url) as conn:
+        exists = conn.execute("SELECT to_regclass('public.recipes') IS NOT NULL").fetchone()[0]
+    if not exists:
+        reset_database(url)
+    return not exists
+
+
 def reset_database(url: str = DATABASE_URL, sql_dir: Path = ROOT_DIR / "db") -> None:
     """Drop and recreate every table, then load the seed data, in one transaction."""
     with psycopg.connect(url) as conn:

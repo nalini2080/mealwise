@@ -3,8 +3,8 @@ from datetime import date
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.config import DEFAULT_PROFILE_ID
 from app.db import get_conn
+from app.profile import current_profile
 from app.routers.goals import GOAL_COLUMNS
 from app.routers.recipes import DAY_TOTALS_CTE, NUTRIENTS
 from app.schemas import DaySummary, MealLog, MealLogIn
@@ -37,9 +37,10 @@ def _nest(row: dict) -> dict:
 def day_summary(
     day: date | None = Query(default=None, description="Defaults to today"),
     conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
 ):
     """Everything logged for a day, with totals to compare against goals."""
-    params = {"profile_id": DEFAULT_PROFILE_ID, "day": day or date.today()}
+    params = {"profile_id": profile_id, "day": day or date.today()}
     goals = conn.execute(
         f"SELECT {GOAL_COLUMNS} FROM nutrition_goals WHERE profile_id = %(profile_id)s", params
     ).fetchone()
@@ -49,8 +50,13 @@ def day_summary(
 
 
 @router.post("", response_model=MealLog, status_code=status.HTTP_201_CREATED)
-def log_meal(body: MealLogIn, conn: psycopg.Connection = Depends(get_conn)):
-    if not conn.execute("SELECT 1 FROM recipes WHERE id = %s", (body.recipe_id,)).fetchone():
+def log_meal(body: MealLogIn, conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
+):
+    if not conn.execute(
+        "SELECT 1 FROM recipes WHERE id = %s AND (created_by IS NULL OR created_by = %s)",
+        (body.recipe_id, profile_id),
+    ).fetchone():
         raise HTTPException(404, "Recipe not found.")
     day = body.eaten_on or date.today()
     meal_id = conn.execute(
@@ -58,17 +64,19 @@ def log_meal(body: MealLogIn, conn: psycopg.Connection = Depends(get_conn)):
         INSERT INTO meal_logs (profile_id, recipe_id, servings, eaten_on)
         VALUES (%s, %s, %s, %s) RETURNING id
         """,
-        (DEFAULT_PROFILE_ID, body.recipe_id, body.servings, day),
+        (profile_id, body.recipe_id, body.servings, day),
     ).fetchone()["id"]
-    rows = conn.execute(MEALS_SQL, {"profile_id": DEFAULT_PROFILE_ID, "day": day}).fetchall()
+    rows = conn.execute(MEALS_SQL, {"profile_id": profile_id, "day": day}).fetchall()
     return _nest(next(row for row in rows if row["id"] == meal_id))
 
 
 @router.delete("/{meal_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_meal(meal_id: int, conn: psycopg.Connection = Depends(get_conn)):
+def delete_meal(meal_id: int, conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
+):
     deleted = conn.execute(
         "DELETE FROM meal_logs WHERE id = %s AND profile_id = %s",
-        (meal_id, DEFAULT_PROFILE_ID),
+        (meal_id, profile_id),
     ).rowcount
     if not deleted:
         raise HTTPException(404, "Meal log not found.")

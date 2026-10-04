@@ -1,0 +1,19 @@
+# Render Blueprint: free web service built from the Dockerfile.
+# The database lives on Neon's free plan (Render's free Postgres expires after 30 days).
+services:
+  - type: web
+    name: mealwise
+    runtime: docker
+    plan: free
+    region: oregon
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL       # Neon connection string, entered in the Render dashboard
+        sync: false
+      - key: GEMINI_API_KEY     # free key from aistudio.google.com, entered in the dashboard
+        sync: false
+      - key: SECRET_KEY         # signs visitor cookies
+        generateValue: true
+      - key: COOKIE_SECURE
+        value: "true"

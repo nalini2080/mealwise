@@ -1,8 +1,8 @@
 import psycopg
 from fastapi import APIRouter, Depends
 
-from app.config import DEFAULT_PROFILE_ID
 from app.db import get_conn
+from app.profile import current_profile
 from app.schemas import Goals
 
 router = APIRouter(prefix="/api/goals", tags=["goals"])
@@ -11,15 +11,19 @@ GOAL_COLUMNS = "kcal, protein_g, veg_servings, fiber_g, iron_mg"
 
 
 @router.get("", response_model=Goals)
-def get_goals(conn: psycopg.Connection = Depends(get_conn)):
+def get_goals(conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
+):
     return conn.execute(
         f"SELECT {GOAL_COLUMNS} FROM nutrition_goals WHERE profile_id = %s",
-        (DEFAULT_PROFILE_ID,),
+        (profile_id,),
     ).fetchone()
 
 
 @router.put("", response_model=Goals)
-def update_goals(goals: Goals, conn: psycopg.Connection = Depends(get_conn)):
+def update_goals(goals: Goals, conn: psycopg.Connection = Depends(get_conn),
+    profile_id: int = Depends(current_profile),
+):
     return conn.execute(
         f"""
         INSERT INTO nutrition_goals (profile_id, {GOAL_COLUMNS})
@@ -30,5 +34,5 @@ def update_goals(goals: Goals, conn: psycopg.Connection = Depends(get_conn)):
             iron_mg = EXCLUDED.iron_mg, updated_at = now()
         RETURNING {GOAL_COLUMNS}
         """,
-        {"profile_id": DEFAULT_PROFILE_ID, **goals.model_dump()},
+        {"profile_id": profile_id, **goals.model_dump()},
     ).fetchone()
