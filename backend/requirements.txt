@@ -1,0 +1,4 @@
+fastapi[standard]==0.142.2
+psycopg[binary,pool]==3.3.6
+google-genai==2.28.0
+python-dotenv==1.2.4
